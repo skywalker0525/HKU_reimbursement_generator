@@ -9,7 +9,7 @@ The app interface is Chinese + English. The generated reimbursement package is E
 For selected PDF/JPG/PNG receipts, the app creates a folder such as:
 
 ```text
-Reimbursement_20260512_CLAIMANT_NAME/
+Reimbursement_DATE_CLAIMANT_NAME/
 ```
 
 Inside the folder:
@@ -105,24 +105,15 @@ Start_Reimbursement_Generator.bat
 6. Review and edit the preview table.
 7. Click `生成材料 / Generate Package`.
 
-## Required Local Template
+## Included Excel Template
 
-The app expects this blank HKU reimbursement Excel form to exist relative to the app folder:
-
-```text
-../报销/615_404 Reimbursement form.xlsx
-```
-
-This matches the original local workspace layout:
+The blank HKU reimbursement Excel form is included in this repository:
 
 ```text
-新建文件夹/
-  BilingualReimbursementGenerator/
-  报销/
-    615_404 Reimbursement form.xlsx
+templates/615_404_Reimbursement_form.xlsx
 ```
 
-If you move the app, keep the `报销/615_404 Reimbursement form.xlsx` template one folder above the app directory.
+No external Excel template folder is required after cloning the repository.
 
 ## Notes
 

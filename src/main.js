@@ -19,7 +19,7 @@ const {
 } = require('docx');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const DEFAULT_TEMPLATE = path.join(ROOT, '报销', '615_404 Reimbursement form.xlsx');
+const DEFAULT_TEMPLATE = path.join(__dirname, '..', 'templates', '615_404_Reimbursement_form.xlsx');
 const HKAB_URL = 'https://www.hkab.org.hk/en/rates/exchange-rates';
 const HKAB_API_BASE = 'https://www.hkab.org.hk/api/member/public/getExrate';
 
