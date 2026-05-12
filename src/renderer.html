@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>报销材料生成器 / Reimbursement Generator</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <h1>报销材料生成器 / Reimbursement Generator</h1>
+          <p>选择票据，核对信息，然后生成英文报销材料。 / Select receipts, review fields, then generate English reimbursement materials.</p>
+        </div>
+      </header>
+
+      <section class="toolbar">
+        <button id="selectFiles">选择票据 / Select Receipts</button>
+        <button id="selectOutput">选择输出位置 / Select Output Folder</button>
+        <button id="analyze" disabled>识别票据 / Analyze Receipts</button>
+        <button id="generate" disabled>生成材料 / Generate Package</button>
+      </section>
+
+      <section class="claimant">
+        <label>
+          <span>收款人 / Claimant Payee Name</span>
+          <input id="claimantName" placeholder="e.g. CLAIMANT NAME" />
+        </label>
+        <label>
+          <span>部门 / Department</span>
+          <input id="department" placeholder="e.g. Civil Engineering" />
+        </label>
+        <label>
+          <span>学号/职员号 / Staff Student No.</span>
+          <input id="staffStudentNo" />
+        </label>
+        <label>
+          <span>电话 / Telephone No.</span>
+          <input id="telephoneNo" />
+        </label>
+      </section>
+
+      <section class="paths">
+        <div><strong>票据 / Receipts:</strong> <span id="fileCount">0 files</span></div>
+        <div><strong>输出 / Output:</strong> <span id="outputPath">Not selected</span></div>
+      </section>
+
+      <section class="status" id="status">准备就绪 / Ready</section>
+      <section class="progressPanel">
+        <div class="progressMeta">
+          <span id="progressText">等待生成 / Waiting</span>
+          <span id="progressPct">0%</span>
+        </div>
+        <progress id="progressBar" max="100" value="0"></progress>
+      </section>
+
+      <section class="tableWrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>文件 / File</th>
+              <th>英文描述 / English Description</th>
+              <th>发票号 / Invoice No.</th>
+              <th>日期 / Date</th>
+              <th>币种 / Currency</th>
+              <th>原金额 / Original Amount</th>
+              <th>HKAB 汇率 / HKAB Rate</th>
+              <th>港币金额 / HKD Amount</th>
+              <th>状态 / Status</th>
+            </tr>
+          </thead>
+          <tbody id="receiptBody">
+            <tr class="empty"><td colspan="10">请先选择票据。 / Select receipt files first.</td></tr>
+          </tbody>
+        </table>
+      </section>
+    </main>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>
