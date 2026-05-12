@@ -31,7 +31,7 @@ function createWindow() {
     height: 820,
     minWidth: 980,
     minHeight: 680,
-    title: '报销材料生成器 / Reimbursement Generator',
+    title: 'HKU_reimbursement_generator',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
     },
@@ -257,10 +257,10 @@ async function generatePackage({ receipts, outputBase, claimantInfo }, reportPro
   const today = new Date();
   const claimantSlug = sanitizePersonName(claimant.claimantName) || 'CLAIMANT';
   const outputRoot = uniquePath(path.join(outputBase || ROOT, `Reimbursement_${formatDate(today)}_${claimantSlug}`));
-  const piaoDir = path.join(outputRoot, 'piao');
+  const receiptsDir = path.join(outputRoot, 'receipts');
   const rateDir = path.join(outputRoot, 'exchange_rates');
   const receiptShotDir = path.join(outputRoot, 'receipt_screenshots');
-  await fs.mkdir(piaoDir, { recursive: true });
+  await fs.mkdir(receiptsDir, { recursive: true });
   await fs.mkdir(rateDir, { recursive: true });
   await fs.mkdir(receiptShotDir, { recursive: true });
   reportProgress({ percent: 8, message: 'Created output folder / 已创建输出文件夹' });
@@ -288,7 +288,7 @@ async function generatePackage({ receipts, outputBase, claimantInfo }, reportPro
     } else {
       receipt.warning = joinWarning(receipt.warning, 'Non-HKD/RMB currency needs manual confirmation.');
     }
-    receipt.copiedPath = await copyRenamedReceipt(receipt, piaoDir);
+    receipt.copiedPath = await copyRenamedReceipt(receipt, receiptsDir);
     receipt.receiptScreenshot = await captureReceiptImage(receipt.copiedPath, receiptShotDir, receipt.index);
     enriched.push(receipt);
   }
@@ -627,11 +627,11 @@ function escapeText(value) {
     .replace(/"/g, '&quot;');
 }
 
-async function copyRenamedReceipt(receipt, piaoDir) {
+async function copyRenamedReceipt(receipt, receiptsDir) {
   const ext = path.extname(receipt.sourcePath).toLowerCase();
   const amount = receipt.originalAmount || '0.00';
   const name = `${String(receipt.index).padStart(2, '0')}_${sanitizeFileName(receipt.description)}_${receipt.currency}${amount}${ext}`;
-  const dest = uniquePath(path.join(piaoDir, name));
+  const dest = uniquePath(path.join(receiptsDir, name));
   await fs.copyFile(receipt.sourcePath, dest);
   return dest;
 }

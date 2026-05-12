@@ -1,7 +1,7 @@
 {
-  "name": "bilingual-reimbursement-generator",
+  "name": "hku_reimbursement_generator",
   "version": "1.0.0",
-  "description": "Chinese/English desktop app for generating HKU reimbursement packages.",
+  "description": "Bilingual desktop app for generating English HKU reimbursement packages.",
   "main": "src/main.js",
   "scripts": {
     "start": "electron ."
