@@ -14,6 +14,7 @@ const {
   HeadingLevel,
   ImageRun,
   Packer,
+  PageBreak,
   Paragraph,
   TextRun,
 } = require('docx');
@@ -886,7 +887,8 @@ async function buildWord(receipts, wordPath, claimant) {
     new Paragraph(''),
   ];
 
-  for (const receipt of receipts) {
+  for (let i = 0; i < receipts.length; i += 1) {
+    const receipt = receipts[i];
     children.push(new Paragraph({
       text: `${receipt.index}. ${receipt.description}`,
       heading: HeadingLevel.HEADING_1,
@@ -916,7 +918,9 @@ async function buildWord(receipts, wordPath, claimant) {
       children.push(new Paragraph('HKAB exchange-rate screenshot:'));
       await addImageIfPossible(children, receipt.rateScreenshot, 620);
     }
-    children.push(new Paragraph(''));
+    if (i < receipts.length - 1) {
+      children.push(new Paragraph({ children: [new PageBreak()] }));
+    }
   }
 
   const doc = new Document({

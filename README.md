@@ -64,6 +64,8 @@ Main output files / 主要输出文件：
 - HKU Excel 模板已包含在 `templates/` 文件夹中。
 - RMB receipts use HKAB CNY Selling by invoice date.
 - 人民币票据按发票日期使用 HKAB CNY Selling 汇率。
+- Each Word receipt item starts on its own page.
+- Word 文档中每个报销事项单独一页。
 - Excel total is formula-based and moves down automatically if there are many items.
 - Excel 总额使用公式；如果报销事项较多，Total 行会自动下移。
 - Original receipt files are copied, not overwritten.
