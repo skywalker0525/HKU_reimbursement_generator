@@ -848,6 +848,15 @@ async function buildExcel(receipts, excelPath, claimant) {
   sheet.getCell('D20').value = claimant.telephoneNo;
 
   const startRow = 29;
+  const defaultTotalRow = 55;
+  const maxTemplateItems = Math.floor((defaultTotalRow - startRow) / 2);
+  const extraItems = Math.max(0, receipts.length - maxTemplateItems);
+  if (extraItems > 0) {
+    sheet.duplicateRow(defaultTotalRow - 2, extraItems * 2, true);
+  }
+  const totalRow = defaultTotalRow + extraItems * 2;
+  const lastAmountRow = receipts.length ? startRow + (receipts.length - 1) * 2 : startRow;
+
   receipts.forEach((receipt, i) => {
     const row = startRow + i * 2;
     sheet.getCell(`A${row}`).value = receipt.description;
@@ -856,8 +865,8 @@ async function buildExcel(receipts, excelPath, claimant) {
     amountCell.value = Number(receipt.hkdAmount) || 0;
     amountCell.numFmt = '"HK$" #,##0.00';
   });
-  const totalCell = sheet.getCell('K55');
-  totalCell.value = { formula: 'SUM(K29:K54)' };
+  const totalCell = sheet.getCell(`K${totalRow}`);
+  totalCell.value = { formula: `SUM(K${startRow}:K${lastAmountRow})` };
   totalCell.numFmt = '"HK$" #,##0.00';
   await workbook.xlsx.writeFile(excelPath);
 }
