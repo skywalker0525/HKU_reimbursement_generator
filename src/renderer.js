@@ -2,6 +2,7 @@ const state = {
   files: [],
   outputBase: '',
   receipts: [],
+  profiles: [],
 };
 
 const el = {
@@ -17,10 +18,17 @@ const el = {
   department: document.getElementById('department'),
   staffStudentNo: document.getElementById('staffStudentNo'),
   telephoneNo: document.getElementById('telephoneNo'),
+  profileSelect: document.getElementById('profileSelect'),
+  saveProfile: document.getElementById('saveProfile'),
+  deleteProfile: document.getElementById('deleteProfile'),
+  receiptStartsNewPage: document.getElementById('receiptStartsNewPage'),
+  exchangeEvidencePosition: document.getElementById('exchangeEvidencePosition'),
   progressText: document.getElementById('progressText'),
   progressPct: document.getElementById('progressPct'),
   progressBar: document.getElementById('progressBar'),
 };
+
+loadProfiles();
 
 window.reimburse.onProgress((payload) => {
   const pct = Math.max(0, Math.min(100, Number(payload.percent) || 0));
@@ -79,7 +87,20 @@ el.generate.addEventListener('click', async () => {
         staffStudentNo: el.staffStudentNo.value.trim(),
         telephoneNo: el.telephoneNo.value.trim(),
       },
+      layoutOptions: {
+        receiptStartsNewPage: el.receiptStartsNewPage.checked,
+        exchangeEvidencePosition: el.exchangeEvidencePosition.value,
+      },
     });
+    if (result?.ok === false && result.code === 'MISSING_RATES') {
+      state.receipts = result.receipts || state.receipts;
+      renderTable();
+      setStatus(`汇率缺失 / Missing exchange rates: please fill highlighted HKAB Rate or HKD Amount rows, then generate again.`, true);
+      el.progressBar.value = 0;
+      el.progressPct.textContent = '0%';
+      el.progressText.textContent = 'Waiting for manual rates / 等待手动填写汇率';
+      return;
+    }
     state.receipts = result.receipts;
     renderTable();
     setStatus(`生成完成 / Generated: ${result.outputRoot}`);
@@ -89,6 +110,33 @@ el.generate.addEventListener('click', async () => {
     setBusy(false);
     updateButtons();
   }
+});
+
+el.profileSelect.addEventListener('change', () => {
+  const profile = state.profiles.find((item) => item.id === el.profileSelect.value);
+  if (!profile) return;
+  el.claimantName.value = profile.claimantName || '';
+  el.department.value = profile.department || '';
+  el.staffStudentNo.value = profile.staffStudentNo || '';
+  el.telephoneNo.value = profile.telephoneNo || '';
+});
+
+el.saveProfile.addEventListener('click', async () => {
+  const profile = currentClaimantProfile();
+  if (!profile.claimantName) {
+    setStatus('Please enter claimant name before saving a profile.', true);
+    return;
+  }
+  state.profiles = await window.reimburse.saveProfile({ ...profile, id: el.profileSelect.value || profile.claimantName });
+  renderProfiles(el.profileSelect.value || profile.claimantName);
+  setStatus('Profile saved / 常用信息已保存');
+});
+
+el.deleteProfile.addEventListener('click', async () => {
+  if (!el.profileSelect.value) return;
+  state.profiles = await window.reimburse.deleteProfile(el.profileSelect.value);
+  renderProfiles('');
+  setStatus('Profile deleted / 常用信息已删除');
 });
 
 function updateButtons() {
@@ -124,7 +172,7 @@ function renderTable() {
     return;
   }
   el.receiptBody.innerHTML = state.receipts.map((receipt, idx) => `
-    <tr data-index="${idx}">
+    <tr data-index="${idx}" class="${receipt.missingRate ? 'missingRate' : ''}">
       <td>${idx + 1}</td>
       <td class="fileCell">${escapeHtml(receipt.originalName)}</td>
       <td><input data-field="description" value="${escapeAttr(receipt.description)}" /></td>
@@ -132,13 +180,13 @@ function renderTable() {
       <td><input data-field="invoiceDate" type="date" value="${escapeAttr(receipt.invoiceDate)}" /></td>
       <td>
         <select data-field="currency">
-          ${['RMB', 'HKD', 'USD', 'OTHER'].map((currency) => `<option ${receipt.currency === currency ? 'selected' : ''}>${currency}</option>`).join('')}
+          ${['RMB', 'HKD', 'USD', 'EUR', 'GBP', 'JPY', 'OTHER'].map((currency) => `<option ${receipt.currency === currency ? 'selected' : ''}>${currency}</option>`).join('')}
         </select>
       </td>
       <td><input data-field="originalAmount" value="${escapeAttr(receipt.originalAmount)}" /></td>
       <td><input data-field="hkabRate" value="${escapeAttr(receipt.hkabRate)}" placeholder="Auto" /></td>
       <td><input data-field="hkdAmount" value="${escapeAttr(receipt.hkdAmount)}" placeholder="Auto" /></td>
-      <td>${escapeHtml(receipt.warning || receipt.confidence || 'Good')}</td>
+      <td>${escapeHtml(rowStatus(receipt))}</td>
     </tr>
   `).join('');
 }
@@ -163,6 +211,53 @@ function escapeHtml(value) {
 
 function escapeAttr(value) {
   return escapeHtml(value).replace(/`/g, '&#096;');
+}
+
+function rowStatus(receipt) {
+  if (receipt.missingRate) return '缺少汇率 / Missing exchange rate';
+  const reviewFields = receipt.fieldConfidence
+    ? Object.entries(receipt.fieldConfidence)
+      .filter(([, info]) => info.level !== 'good')
+      .map(([field]) => fieldLabel(field))
+    : [];
+  if (reviewFields.length) {
+    return `请检查：${reviewFields.map((field) => field.zh).join('、')} / Please review: ${reviewFields.map((field) => field.en).join(', ')}`;
+  }
+  return '正常 / Good';
+}
+
+function fieldLabel(field) {
+  const labels = {
+    invoiceNumber: { zh: '发票号', en: 'Invoice number' },
+    invoiceDate: { zh: '日期', en: 'Date' },
+    description: { zh: '英文描述', en: 'English description' },
+    currency: { zh: '币种', en: 'Currency' },
+    amount: { zh: '金额', en: 'Amount' },
+  };
+  return labels[field] || { zh: field, en: field };
+}
+
+function currentClaimantProfile() {
+  return {
+    claimantName: el.claimantName.value.trim(),
+    department: el.department.value.trim(),
+    staffStudentNo: el.staffStudentNo.value.trim(),
+    telephoneNo: el.telephoneNo.value.trim(),
+  };
+}
+
+async function loadProfiles() {
+  try {
+    state.profiles = await window.reimburse.listProfiles();
+    renderProfiles('');
+  } catch (error) {
+    setStatus(`Profile load failed: ${error.message}`, true);
+  }
+}
+
+function renderProfiles(selectedId) {
+  el.profileSelect.innerHTML = '<option value="">Unsaved profile</option>'
+    + state.profiles.map((profile) => `<option value="${escapeAttr(profile.id)}" ${profile.id === selectedId ? 'selected' : ''}>${escapeHtml(profile.claimantName || profile.id)}</option>`).join('');
 }
 
 updateButtons();

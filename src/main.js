@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, nativeImage } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
 const fss = require('fs');
@@ -23,6 +23,13 @@ const ROOT = path.resolve(__dirname, '..', '..');
 const DEFAULT_TEMPLATE = path.join(__dirname, '..', 'templates', '615_404_Reimbursement_form.xlsx');
 const HKAB_URL = 'https://www.hkab.org.hk/en/rates/exchange-rates';
 const HKAB_API_BASE = 'https://www.hkab.org.hk/api/member/public/getExrate';
+const HKAB_CURRENCY_NAMES = {
+  CNY: 'Onshore RMB / Chinese Yuan',
+  USD: 'US Dollar',
+  EUR: 'Euro',
+  GBP: 'Pound Sterling',
+  JPY: 'Japanese Yen',
+};
 
 let mainWindow;
 
@@ -40,14 +47,17 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, 'renderer.html'));
 }
 
-app.whenReady().then(createWindow);
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) createWindow();
-});
+if (app?.whenReady) {
+  app.whenReady().then(createWindow);
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+  });
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  });
+}
 
+if (ipcMain) {
 ipcMain.handle('select-files', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: '选择票据 / Select Receipts',
@@ -76,9 +86,29 @@ ipcMain.handle('analyze-files', async (_event, filePaths) => {
   return receipts;
 });
 
-ipcMain.handle('generate-package', async (event, payload) => generatePackage(payload, (progress) => {
-  event.sender.send('generation-progress', progress);
-}));
+ipcMain.handle('generate-package', async (event, payload) => {
+  try {
+    return await generatePackage(payload, (progress) => {
+      event.sender.send('generation-progress', progress);
+    });
+  } catch (error) {
+    if (error.code === 'MISSING_RATES') {
+      return {
+        ok: false,
+        code: error.code,
+        message: error.message,
+        receipts: error.receipts,
+        missingRates: error.missingRates,
+      };
+    }
+    throw error;
+  }
+});
+
+ipcMain.handle('list-profiles', async () => listProfiles());
+ipcMain.handle('save-profile', async (_event, profile) => saveProfile(profile));
+ipcMain.handle('delete-profile', async (_event, profileId) => deleteProfile(profileId));
+}
 
 async function analyzeReceipt(filePath, index) {
   const ext = path.extname(filePath).toLowerCase();
@@ -105,10 +135,22 @@ async function analyzeReceipt(filePath, index) {
   const currency = extractCurrency(text, filePath);
   const rawDescription = extractDescription(text, filePath);
   const description = toEnglishDescription(rawDescription || path.basename(filePath, ext));
+  const fieldConfidence = buildFieldConfidence({
+    invoiceNumber,
+    invoiceDate,
+    description,
+    currency,
+    amount,
+    text,
+    usedMtimeDate: !extractInvoiceDate(text),
+  });
 
   if (!amount) warnings.push('Amount needs review.');
   if (!invoiceNumber) warnings.push('Invoice number needs review.');
   if (!text.trim()) warnings.push('No embedded text found. Please review fields manually.');
+  const lowConfidenceFields = Object.entries(fieldConfidence)
+    .filter(([, info]) => info.level !== 'good')
+    .map(([field]) => field);
 
   return {
     id: `${Date.now()}-${index}`,
@@ -122,8 +164,30 @@ async function analyzeReceipt(filePath, index) {
     originalAmount: amount || '',
     hkabRate: '',
     hkdAmount: '',
-    confidence: warnings.length ? 'Needs review' : 'Good',
+    fieldConfidence,
+    confidence: warnings.length ? '请检查 / Please review' : '正常 / Good',
     warning: warnings.join(' '),
+  };
+}
+
+function buildFieldConfidence({ invoiceNumber, invoiceDate, description, currency, amount, text, usedMtimeDate }) {
+  const hasText = Boolean(String(text || '').trim());
+  return {
+    invoiceNumber: invoiceNumber
+      ? { level: 'good', message: 'Detected invoice number.' }
+      : { level: 'review', message: 'Invoice number was not detected.' },
+    invoiceDate: invoiceDate && !usedMtimeDate
+      ? { level: 'good', message: 'Detected invoice date.' }
+      : { level: 'review', message: usedMtimeDate ? 'Using file modified date.' : 'Invoice date was not detected.' },
+    description: description && description !== 'Receipt Expense'
+      ? { level: 'good', message: 'Detected description.' }
+      : { level: 'review', message: 'Description needs review.' },
+    currency: currency
+      ? { level: hasText ? 'good' : 'review', message: hasText ? 'Detected currency.' : 'Currency inferred from default.' }
+      : { level: 'review', message: 'Currency needs review.' },
+    amount: amount
+      ? { level: 'good', message: 'Detected amount.' }
+      : { level: 'review', message: 'Amount was not detected.' },
   };
 }
 
@@ -185,8 +249,18 @@ function extractCurrency(text, filePath) {
   const haystack = `${text}\n${filePath}`;
   if (/HKD|HK\$|港币|港幣/i.test(haystack)) return 'HKD';
   if (/USD|US\$|美元/i.test(haystack)) return 'USD';
+  if (/EUR|€|Euro|欧元|歐元/i.test(haystack)) return 'EUR';
+  if (/GBP|£|Pound|英镑|英鎊/i.test(haystack)) return 'GBP';
+  if (/JPY|日元|日圓/i.test(haystack)) return 'JPY';
   if (/RMB|CNY|¥|￥|人民币|人民幣|China Tax/i.test(haystack)) return 'RMB';
   return 'RMB';
+}
+
+function normalizeCurrencyCode(value) {
+  const code = String(value || '').trim().toUpperCase();
+  if (code === 'RMB') return 'CNY';
+  if (['CNY', 'HKD', 'USD', 'EUR', 'GBP', 'JPY'].includes(code)) return code;
+  return 'OTHER';
 }
 
 function extractDescription(text, filePath) {
@@ -252,9 +326,18 @@ function toEnglishDescription(value) {
   return titleCase(cleaned || 'Receipt Expense');
 }
 
-async function generatePackage({ receipts, outputBase, claimantInfo }, reportProgress = () => {}) {
+async function generatePackage({ receipts, outputBase, claimantInfo, layoutOptions }, reportProgress = () => {}) {
   if (!receipts?.length) throw new Error('No receipts to generate.');
   const claimant = normalizeClaimantInfo(claimantInfo);
+  reportProgress({ percent: 3, message: 'Checking exchange rates / 正在检查汇率' });
+  const preflight = await preflightExchangeRates(receipts);
+  if (preflight.missingRates.length) {
+    const error = new Error('Exchange rates are missing. Please fill the highlighted rows and generate again.');
+    error.code = 'MISSING_RATES';
+    error.receipts = preflight.receipts;
+    error.missingRates = preflight.missingRates;
+    throw error;
+  }
   const today = new Date();
   const claimantSlug = sanitizePersonName(claimant.claimantName) || 'CLAIMANT';
   const outputRoot = uniquePath(path.join(outputBase || ROOT, `Reimbursement_${formatDate(today)}_${claimantSlug}`));
@@ -267,27 +350,13 @@ async function generatePackage({ receipts, outputBase, claimantInfo }, reportPro
   reportProgress({ percent: 8, message: 'Created output folder / 已创建输出文件夹' });
 
   const enriched = [];
-  const rateCache = new Map();
-  for (let i = 0; i < receipts.length; i += 1) {
-    const receipt = { ...receipts[i], index: i + 1 };
+  for (let i = 0; i < preflight.receipts.length; i += 1) {
+    const receipt = { ...preflight.receipts[i], index: i + 1 };
     reportProgress({ percent: 10 + Math.round((i / receipts.length) * 55), message: `Processing receipt ${i + 1}/${receipts.length} / 正在处理票据 ${i + 1}/${receipts.length}` });
-    const amount = Number(String(receipt.originalAmount).replace(/,/g, '')) || 0;
-    if (receipt.currency === 'RMB') {
-      let rateInfo = rateCache.get(receipt.invoiceDate || 'current');
-      if (!rateInfo) {
-        rateInfo = await captureExchangeRate(receipt.invoiceDate, rateDir);
-        rateCache.set(receipt.invoiceDate || 'current', rateInfo);
-      }
-      receipt.hkabRate = receipt.hkabRate || rateInfo.rate || '';
+    if (receipt.rateCode && receipt.rateCode !== 'HKD' && receipt.hkabRate) {
+      const rateInfo = await captureExchangeRate(receipt.invoiceDate, rateDir, receipt.rateCode, receipt.hkabRate);
       receipt.rateScreenshot = rateInfo.screenshotPath;
       receipt.rateSource = HKAB_URL;
-      const rate = Number(receipt.hkabRate);
-      receipt.hkdAmount = rate ? (amount * rate / 100).toFixed(2) : receipt.hkdAmount || '';
-      if (!rate) receipt.warning = joinWarning(receipt.warning, rateInfo.warning || 'HKAB CNY Selling rate could not be parsed automatically for the invoice date.');
-    } else if (receipt.currency === 'HKD') {
-      receipt.hkdAmount = amount.toFixed(2);
-    } else {
-      receipt.warning = joinWarning(receipt.warning, 'Non-HKD/RMB currency needs manual confirmation.');
     }
     receipt.copiedPath = await copyRenamedReceipt(receipt, receiptsDir);
     receipt.receiptScreenshot = await captureReceiptImage(receipt.copiedPath, receiptShotDir, receipt.index);
@@ -302,7 +371,7 @@ async function generatePackage({ receipts, outputBase, claimantInfo }, reportPro
   reportProgress({ percent: 72, message: 'Writing Excel / 正在写入 Excel' });
   await buildExcel(enriched, excelPath, claimant);
   reportProgress({ percent: 84, message: 'Writing Word document / 正在生成 Word 文档' });
-  await buildWord(enriched, wordPath, claimant);
+  await buildWord(enriched, wordPath, claimant, normalizeLayoutOptions(layoutOptions));
   reportProgress({ percent: 94, message: 'Saving preview data / 正在保存预览数据' });
   await fs.writeFile(previewPath, JSON.stringify(enriched, null, 2), 'utf8');
   reportProgress({ percent: 100, message: 'Done / 完成' });
@@ -310,31 +379,107 @@ async function generatePackage({ receipts, outputBase, claimantInfo }, reportPro
   return { outputRoot, excelPath, wordPath, previewPath, receipts: enriched };
 }
 
-async function captureExchangeRate(invoiceDate, rateDir) {
+async function preflightExchangeRates(receipts) {
+  const missingRates = [];
+  const rateCache = new Map();
+  const enriched = [];
+  for (let i = 0; i < receipts.length; i += 1) {
+    const receipt = { ...receipts[i], index: i + 1, missingRate: false };
+    const amount = Number(String(receipt.originalAmount).replace(/,/g, '')) || 0;
+    const code = normalizeCurrencyCode(receipt.currency);
+    receipt.rateCode = code;
+
+    if (!amount) {
+      receipt.warning = joinWarning(receipt.warning, 'Original amount is missing or invalid.');
+      enriched.push(receipt);
+      continue;
+    }
+    if (code === 'HKD') {
+      receipt.hkabRate = '';
+      receipt.hkdAmount = amount.toFixed(2);
+      enriched.push(receipt);
+      continue;
+    }
+
+    const manualRate = Number(String(receipt.hkabRate || '').replace(/,/g, ''));
+    const manualHkdAmount = Number(String(receipt.hkdAmount || '').replace(/,/g, ''));
+    if (Number.isFinite(manualRate) && manualRate > 0) {
+      receipt.hkabRate = trimRate(manualRate);
+      receipt.hkdAmount = (amount * manualRate / 100).toFixed(2);
+      enriched.push(receipt);
+      continue;
+    }
+    if (code === 'OTHER') {
+      if (Number.isFinite(manualHkdAmount) && manualHkdAmount > 0) {
+        receipt.hkdAmount = manualHkdAmount.toFixed(2);
+        enriched.push(receipt);
+        continue;
+      }
+      markMissingRate(receipt, missingRates, 'OTHER needs a manual HKAB Rate or HKD Amount.');
+      enriched.push(receipt);
+      continue;
+    }
+
+    const cacheKey = `${code}:${receipt.invoiceDate || 'current'}`;
+    let rateInfo = rateCache.get(cacheKey);
+    if (!rateInfo) {
+      rateInfo = await fetchHkabApiRate(receipt.invoiceDate || toDateInput(new Date()), code);
+      rateCache.set(cacheKey, rateInfo);
+    }
+    const autoRate = Number(rateInfo.rate);
+    if (Number.isFinite(autoRate) && autoRate > 0 && (!receipt.invoiceDate || !rateInfo.rateDate || rateInfo.rateDate === receipt.invoiceDate)) {
+      receipt.hkabRate = String(rateInfo.rate);
+      receipt.hkdAmount = (amount * autoRate / 100).toFixed(2);
+      enriched.push(receipt);
+      continue;
+    }
+    markMissingRate(receipt, missingRates, rateInfo.warning || `HKAB ${code} Selling rate could not be resolved for this invoice date.`);
+    enriched.push(receipt);
+  }
+  return { receipts: enriched, missingRates };
+}
+
+function markMissingRate(receipt, missingRates, message) {
+  receipt.missingRate = true;
+  receipt.warning = joinWarning(receipt.warning, message);
+  missingRates.push({
+    index: receipt.index,
+    originalName: receipt.originalName,
+    currency: receipt.currency,
+    invoiceDate: receipt.invoiceDate,
+    message,
+  });
+}
+
+async function captureExchangeRate(invoiceDate, rateDir, currencyCode = 'CNY', fallbackRate = '') {
+  const code = normalizeCurrencyCode(currencyCode);
   const safeDate = invoiceDate || formatDate(new Date());
-  const screenshotPath = path.join(rateDir, `HKAB_CNY_${safeDate}.png`);
-  const apiRate = await fetchHkabApiRate(safeDate);
-  if (apiRate.rate) {
+  const screenshotPath = path.join(rateDir, `HKAB_${code}_${safeDate}.png`);
+  const apiRate = await fetchHkabApiRate(safeDate, code);
+  const evidenceRate = apiRate.rate || fallbackRate || '';
+  if (evidenceRate) {
     const evidenceHtml = buildHkabEvidenceHtml({
+      currencyCode: code,
       requestedDate: safeDate,
       rateDate: apiRate.rateDate,
       lastUpdated: apiRate.lastUpdated,
-      rate: apiRate.rate,
+      rate: evidenceRate,
       sourceUrl: `${HKAB_API_BASE}/${safeDate}`,
-      rowHtml: buildHkabApiRowHtml(apiRate),
-      warning: apiRate.holiday ? 'HKAB marks this date as a non-working day.' : '',
+      rowHtml: buildHkabApiRowHtml({ ...apiRate, rate: evidenceRate, currencyCode: code }),
+      warning: apiRate.rate ? (apiRate.holiday ? 'HKAB marks this date as a non-working day.' : '') : 'Manual rate entered by user.',
     });
     await captureHtmlEvidence(evidenceHtml, screenshotPath);
-    return { rate: apiRate.rate, screenshotPath };
+    return { rate: evidenceRate, screenshotPath };
   }
 
-  const interactive = await tryCaptureInteractiveHkabRate(safeDate, screenshotPath);
+  const interactive = await tryCaptureInteractiveHkabRate(safeDate, screenshotPath, code);
   if (interactive.rate || interactive.screenshotPath) return interactive;
 
   const page = await fetchHkabExchangePage();
-  const parsed = parseHkabPage(page.html);
+  const parsed = parseHkabPage(page.html, code);
   if (parsed.rate && (!invoiceDate || parsed.rateDate === invoiceDate)) {
     const evidenceHtml = buildHkabEvidenceHtml({
+      currencyCode: code,
       requestedDate: safeDate,
       rateDate: parsed.rateDate,
       lastUpdated: parsed.lastUpdated,
@@ -347,6 +492,7 @@ async function captureExchangeRate(invoiceDate, rateDir) {
   }
 
   const evidenceHtml = buildHkabEvidenceHtml({
+    currencyCode: code,
     requestedDate: safeDate,
     rateDate: parsed.rateDate,
     lastUpdated: parsed.lastUpdated,
@@ -359,11 +505,11 @@ async function captureExchangeRate(invoiceDate, rateDir) {
   return {
     rate: '',
     screenshotPath,
-    warning: `HKAB did not show the requested invoice date ${safeDate}; please enter the correct CNY Selling rate manually.`,
+    warning: `HKAB did not show the requested invoice date ${safeDate}; please enter the correct ${code} Selling rate manually.`,
   };
 }
 
-async function tryCaptureInteractiveHkabRate(invoiceDate, screenshotPath) {
+async function tryCaptureInteractiveHkabRate(invoiceDate, screenshotPath, currencyCode = 'CNY') {
   const win = new BrowserWindow({
     width: 1365,
     height: 1100,
@@ -389,7 +535,8 @@ async function tryCaptureInteractiveHkabRate(invoiceDate, screenshotPath) {
     const bodyText = await win.webContents.executeJavaScript(`
       (() => {
         const rows = [...document.querySelectorAll('[role="row"], tr, div')];
-        const row = rows.find((el) => /\\bCNY\\b/.test(el.innerText || '') && /Selling/i.test(el.innerText || ''));
+        const code = ${JSON.stringify(currencyCode)};
+        const row = rows.find((el) => new RegExp('\\\\b' + code + '\\\\b').test(el.innerText || '') && /Selling/i.test(el.innerText || ''));
         if (row) {
           row.scrollIntoView({ block: 'center', inline: 'nearest' });
           row.style.outline = '4px solid #d97706';
@@ -402,20 +549,20 @@ async function tryCaptureInteractiveHkabRate(invoiceDate, screenshotPath) {
     const image = await win.webContents.capturePage({ x: 0, y: 0, width: 1365, height: 900 });
     await fs.writeFile(screenshotPath, image.toPNG());
     const displayedDate = extractHkabDisplayedDate(bodyText);
-    const rate = parseCnySellingRate(bodyText);
+    const rate = parseCurrencySellingRate(bodyText, currencyCode);
     if (!rate) return { rate: '', screenshotPath: '' };
     if (invoiceDate && displayedDate && displayedDate !== invoiceDate) {
       return {
         rate: '',
         screenshotPath,
-        warning: `HKAB page displayed ${displayedDate}, not requested invoice date ${invoiceDate}; please enter the correct CNY Selling rate manually.`,
+        warning: `HKAB page displayed ${displayedDate}, not requested invoice date ${invoiceDate}; please enter the correct ${currencyCode} Selling rate manually.`,
       };
     }
     if (invoiceDate && !displayedDate) {
       return {
         rate: '',
         screenshotPath,
-        warning: `HKAB page date could not be verified for invoice date ${invoiceDate}; please enter the correct CNY Selling rate manually.`,
+        warning: `HKAB page date could not be verified for invoice date ${invoiceDate}; please enter the correct ${currencyCode} Selling rate manually.`,
       };
     }
     return { rate, screenshotPath };
@@ -426,10 +573,11 @@ async function tryCaptureInteractiveHkabRate(invoiceDate, screenshotPath) {
   }
 }
 
-function parseCnySellingRate(text) {
+function parseCurrencySellingRate(text, currencyCode = 'CNY') {
+  const code = normalizeCurrencyCode(currencyCode);
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   for (let i = 0; i < lines.length; i += 1) {
-    if (/^(?:Currency Code:\s*)?CNY$/i.test(lines[i]) || /Onshore RMB \/ Chinese Yuan/i.test(lines[i])) {
+    if (new RegExp(`^(?:Currency Code:\\s*)?${code}$`, 'i').test(lines[i]) || new RegExp(HKAB_CURRENCY_NAMES[code] || code, 'i').test(lines[i])) {
       const nearby = lines.slice(Math.max(0, i - 2), i + 12).join(' ');
       const selling = nearby.match(/Selling:?\s*(\d{2,3}\.\d{2,6})/i);
       if (selling) return selling[1];
@@ -438,7 +586,7 @@ function parseCnySellingRate(text) {
     }
   }
   const compact = text.replace(/\s+/g, ' ');
-  const broad = compact.match(/(?:Currency Code:\s*)?CNY\s+Currency:\s+Onshore RMB \/ Chinese Yuan\s+Selling:?\s*(\d{2,3}\.\d{2,6})/i);
+  const broad = compact.match(new RegExp(`(?:Currency Code:\\s*)?${code}\\s+Currency:\\s+[^\\n]+?\\s+Selling:?\\s*(\\d{2,3}\\.\\d{2,6})`, 'i'));
   return broad ? broad[1] : '';
 }
 
@@ -464,11 +612,12 @@ function fetchHkabExchangePage() {
   });
 }
 
-async function fetchHkabApiRate(date) {
+async function fetchHkabApiRate(date, currencyCode = 'CNY') {
+  const code = normalizeCurrencyCode(currencyCode);
   const url = `${HKAB_API_BASE}/${date || ''}`;
   const response = await fetchText(url);
   if (!response.text || response.status < 200 || response.status >= 300) {
-    return { rate: '', warning: `HKAB API request failed for ${date}.` };
+    return { rate: '', currencyCode: code, warning: `HKAB API request failed for ${date}.` };
   }
   try {
     const data = JSON.parse(response.text);
@@ -480,16 +629,18 @@ async function fetchHkabApiRate(date) {
         warning: `HKAB marks ${date} as a non-working day.`,
       };
     }
+    const prefix = code === 'RMB' ? 'CNY' : code;
     return {
-      rate: data?.CNYSelling || '',
-      buyingTT: data?.CNYBuyingTT || '',
-      buyingDD: data?.CNYBuyingOD || '',
+      currencyCode: code,
+      rate: data?.[`${prefix}Selling`] || '',
+      buyingTT: data?.[`${prefix}BuyingTT`] || '',
+      buyingDD: data?.[`${prefix}BuyingOD`] || '',
       rateDate: data?.RateDate || date,
       lastUpdated: data?.updated_at || '',
       holiday: Boolean(data?.holiday),
     };
   } catch (error) {
-    return { rate: '', warning: `HKAB API JSON parse failed: ${error.message}` };
+    return { rate: '', currencyCode: code, warning: `HKAB API JSON parse failed: ${error.message}` };
   }
 }
 
@@ -507,21 +658,24 @@ function fetchText(url) {
 }
 
 function buildHkabApiRowHtml(rateInfo) {
+  const code = normalizeCurrencyCode(rateInfo.currencyCode || 'CNY');
   return `
     <div class="rate-row">
-      <div><span class="mobile_change_layout_table_cell_mobile_title">Currency Code:</span><div>CNY</div></div>
-      <div><span class="mobile_change_layout_table_cell_mobile_title">Currency:</span><div>Onshore RMB / Chinese Yuan</div></div>
+      <div><span class="mobile_change_layout_table_cell_mobile_title">Currency Code:</span><div>${escapeText(code)}</div></div>
+      <div><span class="mobile_change_layout_table_cell_mobile_title">Currency:</span><div>${escapeText(HKAB_CURRENCY_NAMES[code] || code)}</div></div>
       <div><span class="mobile_change_layout_table_cell_mobile_title">Selling:</span><div>${escapeText(rateInfo.rate)}</div></div>
       <div><span class="mobile_change_layout_table_cell_mobile_title">Buying TT:</span><div>${escapeText(rateInfo.buyingTT || '')}</div></div>
       <div><span class="mobile_change_layout_table_cell_mobile_title">Buying D/D:</span><div>${escapeText(rateInfo.buyingDD || '')}</div></div>
     </div>`;
 }
 
-function parseHkabPage(html) {
+function parseHkabPage(html, currencyCode = 'CNY') {
   if (!html) return { rate: '', rateDate: '', lastUpdated: '', rowHtml: '' };
+  const code = normalizeCurrencyCode(currencyCode);
   const rateDate = decodeHtml((html.match(/as on\s*<strong>([^<]+)<\/strong>/i) || [])[1] || '');
   const lastUpdated = decodeHtml((html.match(/Last updated:\s*([^<]+)</i) || [])[1] || '');
-  const cnyIndex = html.search(/<div[^>]*>\s*CNY\s*<\/div>/i);
+  const codePattern = new RegExp(`<div[^>]*>\\s*${code}\\s*<\\/div>`, 'i');
+  const cnyIndex = html.search(codePattern);
   let rowHtml = '';
   if (cnyIndex >= 0) {
     const rowStart = html.lastIndexOf('<div role="row" class="general_table_row exchange_rate"', cnyIndex);
@@ -532,8 +686,8 @@ function parseHkabPage(html) {
   }
   const rowText = stripHtml(rowHtml);
   const rateMatch = rowText.match(/Selling:\s*(\d{2,3}\.\d{2,6})/i)
-    || html.match(/<div[^>]*>\s*CNY\s*<\/div>[\s\S]{0,600}?Selling:[\s\S]{0,120}?(\d{2,3}\.\d{2,6})/i)
-    || html.match(/CNYSelling":\d+[\s\S]{0,600}?"(\d{2,3}\.\d{2,6})"/i);
+    || html.match(new RegExp(`<div[^>]*>\\s*${code}\\s*<\\/div>[\\s\\S]{0,600}?Selling:[\\s\\S]{0,120}?(\\d{2,3}\\.\\d{2,6})`, 'i'))
+    || html.match(new RegExp(`${code}Selling":\\d+[\\s\\S]{0,600}?"(\\d{2,3}\\.\\d{2,6})"`, 'i'));
   return {
     rate: rateMatch ? rateMatch[1] : '',
     rateDate,
@@ -542,11 +696,12 @@ function parseHkabPage(html) {
   };
 }
 
-function buildHkabEvidenceHtml({ requestedDate, rateDate, lastUpdated, rate, sourceUrl, rowHtml, warning = '' }) {
+function buildHkabEvidenceHtml({ currencyCode = 'CNY', requestedDate, rateDate, lastUpdated, rate, sourceUrl, rowHtml, warning = '' }) {
+  const code = normalizeCurrencyCode(currencyCode);
   const cleanRow = rowHtml || `
     <div class="rate-row">
-      <div><b>Currency Code:</b> CNY</div>
-      <div><b>Currency:</b> Onshore RMB / Chinese Yuan</div>
+      <div><b>Currency Code:</b> ${escapeText(code)}</div>
+      <div><b>Currency:</b> ${escapeText(HKAB_CURRENCY_NAMES[code] || code)}</div>
       <div><b>Selling:</b> ${escapeText(rate)}</div>
     </div>`;
   return `<!doctype html>
@@ -642,201 +797,72 @@ async function captureReceiptImage(filePath, outputDir, index) {
   if (['.png', '.jpg', '.jpeg'].includes(ext)) return filePath;
 
   const outputPath = path.join(outputDir, `${String(index).padStart(2, '0')}_receipt.png`);
+  if (ext === '.pdf') {
+    try {
+      await renderPdfFirstPageToPng(filePath, outputPath);
+      return outputPath;
+    } catch (error) {
+      await createTextPng(`PDF render failed.\nSource file: ${filePath}\n${error.message}`, outputPath);
+      return outputPath;
+    }
+  }
+  await createTextPng(`Unsupported receipt image source.\nSource file: ${filePath}`, outputPath);
+  return outputPath;
+}
+
+async function renderPdfFirstPageToPng(pdfPath, outputPath) {
+  const pdfjsRoot = path.dirname(require.resolve('pdfjs-dist/package.json'));
+  const pdfModuleUrl = pathToFileURL(path.join(pdfjsRoot, 'build', 'pdf.mjs')).toString();
+  const workerUrl = pathToFileURL(path.join(pdfjsRoot, 'build', 'pdf.worker.mjs')).toString();
+  const pdfUrl = pathToFileURL(pdfPath).toString();
   const win = new BrowserWindow({
-    width: 1800,
-    height: 1300,
+    width: 1200,
+    height: 1600,
     show: false,
     webPreferences: { sandbox: true },
   });
   try {
-    await win.loadURL(`${pathToFileURL(filePath).toString()}#toolbar=0&navpanes=0&scrollbar=0&view=FitH`);
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-    const canvasPng = await extractPdfViewerCanvas(win);
-    if (canvasPng) {
-      await fs.writeFile(outputPath, canvasPng);
-      return outputPath;
+    const htmlPath = outputPath.replace(/\.png$/i, '.html');
+    await fs.writeFile(htmlPath, buildPdfRenderHtml(pdfModuleUrl, workerUrl, pdfUrl), 'utf8');
+    await win.loadURL(pathToFileURL(htmlPath).toString());
+    const dataUrl = await win.webContents.executeJavaScript('window.__renderPdfPage', true);
+    if (!dataUrl || !dataUrl.startsWith('data:image/png;base64,')) {
+      throw new Error('PDF renderer did not return a PNG.');
     }
-    await win.webContents.executeJavaScript(`
-      document.body.style.background = "white";
-      document.body.style.margin = "0";
-      document.documentElement.style.overflow = "hidden";
-    `);
-    const image = await win.webContents.capturePage();
-    await fs.writeFile(outputPath, image.toPNG());
-    return outputPath;
-  } catch (_error) {
-    await createTextPng(`Receipt screenshot failed.\nSource file: ${filePath}`, outputPath);
+    await fs.writeFile(outputPath, Buffer.from(dataUrl.split(',')[1], 'base64'));
     return outputPath;
   } finally {
     win.destroy();
   }
 }
 
-async function extractPdfViewerCanvas(win) {
-  try {
-    const dataUrl = await win.webContents.executeJavaScript(`
-      (() => {
-        const seen = new Set();
-        const all = [];
-        function walk(root) {
-          if (!root || seen.has(root)) return;
-          seen.add(root);
-          if (root.querySelectorAll) {
-            root.querySelectorAll('*').forEach((el) => {
-              if (el.tagName === 'CANVAS') all.push(el);
-              if (el.shadowRoot) walk(el.shadowRoot);
-            });
-          }
-        }
-        walk(document);
-        const canvases = all.filter((c) => c.width > 300 && c.height > 250);
-        if (!canvases.length) return '';
-        const pageCanvases = canvases.filter((c) => {
-          const rect = c.getBoundingClientRect();
-          return rect.width > 300 && rect.height > 250 && rect.top > 50;
-        });
-        const target = (pageCanvases.length ? pageCanvases : canvases)
-          .sort((a, b) => (b.width * b.height) - (a.width * a.height))[0];
-        return target.toDataURL('image/png');
-      })()
-    `);
-    if (!dataUrl || !dataUrl.startsWith('data:image/png;base64,')) return null;
-    return Buffer.from(dataUrl.split(',')[1], 'base64');
-  } catch (_error) {
-    return null;
-  }
-}
-
-function cropPdfViewerToReceipt(image) {
-  const size = image.getSize();
-  const bitmap = image.toBitmap();
-  const sample = 4;
-  const sw = Math.floor(size.width / sample);
-  const sh = Math.floor(size.height / sample);
-  const isPageLike = (sx, sy) => {
-    const x = sx * sample;
-    const y = sy * sample;
-    const idx = (y * size.width + x) * 4;
-    const b = bitmap[idx];
-    const g = bitmap[idx + 1];
-    const r = bitmap[idx + 2];
-    const bright = r > 218 && g > 218 && b > 218;
-    const redInvoiceLine = r > 130 && g < 110 && b < 110;
-    const darkText = r < 80 && g < 80 && b < 80;
-    return bright || redInvoiceLine || darkText;
-  };
-
-  const visited = new Uint8Array(sw * sh);
-  const stack = [];
-  let best = null;
-  for (let sy = Math.floor(70 / sample); sy < sh; sy += 1) {
-    for (let sx = 0; sx < sw; sx += 1) {
-      const pos = sy * sw + sx;
-      if (visited[pos] || !isPageLike(sx, sy)) continue;
-      let count = 0;
-      let minX = sx;
-      let maxX = sx;
-      let minY = sy;
-      let maxY = sy;
-      visited[pos] = 1;
-      stack.push([sx, sy]);
-      while (stack.length) {
-        const [cx, cy] = stack.pop();
-        count += 1;
-        if (cx < minX) minX = cx;
-        if (cx > maxX) maxX = cx;
-        if (cy < minY) minY = cy;
-        if (cy > maxY) maxY = cy;
-        for (const [nx, ny] of [[cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]]) {
-          if (nx < 0 || ny < 0 || nx >= sw || ny >= sh) continue;
-          const npos = ny * sw + nx;
-          if (visited[npos] || !isPageLike(nx, ny)) continue;
-          visited[npos] = 1;
-          stack.push([nx, ny]);
-        }
-      }
-      const width = (maxX - minX + 1) * sample;
-      const height = (maxY - minY + 1) * sample;
-      const area = width * height;
-      if (width > 350 && height > 250 && (!best || area > best.area)) {
-        best = { minX, maxX, minY, maxY, area };
-      }
-    }
-  }
-  if (!best) return null;
-  const crop = {
-    x: Math.max(0, best.minX * sample - 10),
-    y: Math.max(0, best.minY * sample - 10),
-    width: Math.min(size.width - Math.max(0, best.minX * sample - 10), (best.maxX - best.minX + 1) * sample + 20),
-    height: Math.min(size.height - Math.max(0, best.minY * sample - 10), (best.maxY - best.minY + 1) * sample + 20),
-  };
-  if (crop.width < 300 || crop.height < 250) return null;
-  return nativeImage.createFromBuffer(image.toPNG()).crop(crop);
-}
-
-function cropWhiteReceiptPage(image) {
-  const size = image.getSize();
-  const bitmap = image.toBitmap();
-  const sample = 3;
-  const sw = Math.floor(size.width / sample);
-  const sh = Math.floor(size.height / sample);
-  const visited = new Uint8Array(sw * sh);
-  const stack = [];
-  const isWhite = (sx, sy) => {
-    const x = sx * sample;
-    const y = sy * sample;
-    const idx = (y * size.width + x) * 4;
-    const b = bitmap[idx];
-    const g = bitmap[idx + 1];
-    const r = bitmap[idx + 2];
-    return r > 235 && g > 235 && b > 235;
-  };
-  let best = null;
-  for (let sy = Math.floor(70 / sample); sy < sh; sy += 1) {
-    for (let sx = 0; sx < sw; sx += 1) {
-      const pos = sy * sw + sx;
-      if (visited[pos] || !isWhite(sx, sy)) continue;
-      visited[pos] = 1;
-      stack.push([sx, sy]);
-      let count = 0;
-      let minX = sx;
-      let maxX = sx;
-      let minY = sy;
-      let maxY = sy;
-      while (stack.length) {
-        const [cx, cy] = stack.pop();
-        count += 1;
-        if (cx < minX) minX = cx;
-        if (cx > maxX) maxX = cx;
-        if (cy < minY) minY = cy;
-        if (cy > maxY) maxY = cy;
-        for (const [nx, ny] of [[cx + 1, cy], [cx - 1, cy], [cx, cy + 1], [cx, cy - 1]]) {
-          if (nx < 0 || ny < 0 || nx >= sw || ny >= sh) continue;
-          const npos = ny * sw + nx;
-          if (visited[npos] || !isWhite(nx, ny)) continue;
-          visited[npos] = 1;
-          stack.push([nx, ny]);
-        }
-      }
-      const width = (maxX - minX + 1) * sample;
-      const height = (maxY - minY + 1) * sample;
-      const area = width * height;
-      const plausiblePage = width > 600 && height > 350 && area > 250000;
-      if (plausiblePage && (!best || area > best.area)) {
-        best = { minX, maxX, minY, maxY, area };
-      }
-    }
-  }
-  if (!best) return null;
-  const x = Math.max(0, best.minX * sample - 24);
-  const y = Math.max(0, best.minY * sample - 24);
-  const crop = {
-    x,
-    y,
-    width: Math.min(size.width - x, (best.maxX - best.minX + 1) * sample + 48),
-    height: Math.min(size.height - y, (best.maxY - best.minY + 1) * sample + 48),
-  };
-  return nativeImage.createFromBuffer(image.toPNG()).crop(crop);
+function buildPdfRenderHtml(pdfModuleUrl, workerUrl, pdfUrl) {
+  return `<!doctype html>
+<html>
+<head><meta charset="utf-8"><style>html,body{margin:0;background:white}canvas{display:block}</style></head>
+<body>
+<canvas id="page"></canvas>
+<script type="module">
+  import * as pdfjsLib from ${JSON.stringify(pdfModuleUrl)};
+  pdfjsLib.GlobalWorkerOptions.workerSrc = ${JSON.stringify(workerUrl)};
+  window.__renderPdfPage = (async () => {
+    const pdf = await pdfjsLib.getDocument({ url: ${JSON.stringify(pdfUrl)} }).promise;
+    const page = await pdf.getPage(1);
+    const base = page.getViewport({ scale: 1 });
+    const scale = Math.min(3, Math.max(1.5, 1800 / base.width));
+    const viewport = page.getViewport({ scale });
+    const canvas = document.getElementById('page');
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+    const context = canvas.getContext('2d', { alpha: false });
+    context.fillStyle = '#ffffff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: context, viewport }).promise;
+    return canvas.toDataURL('image/png');
+  })();
+</script>
+</body>
+</html>`;
 }
 
 async function buildExcel(receipts, excelPath, claimant) {
@@ -872,7 +898,7 @@ async function buildExcel(receipts, excelPath, claimant) {
   await workbook.xlsx.writeFile(excelPath);
 }
 
-async function buildWord(receipts, wordPath, claimant) {
+async function buildWord(receipts, wordPath, claimant, layoutOptions = normalizeLayoutOptions()) {
   const children = [
     new Paragraph({
       text: 'Reimbursement Supporting Documents',
@@ -897,10 +923,14 @@ async function buildWord(receipts, wordPath, claimant) {
     children.push(new Paragraph(`Invoice Date: ${receipt.invoiceDate || 'Please verify'}`));
     children.push(new Paragraph(`Voucher: ${receipt.index}`));
     children.push(new Paragraph(`Amount: HK$ ${formatMoney(receipt.hkdAmount)}`));
-    if (receipt.currency === 'RMB') {
-      children.push(new Paragraph(`Original Amount: RMB ${formatMoney(receipt.originalAmount)}`));
-      children.push(new Paragraph(`Exchange rate ${receipt.hkabRate || 'Please verify'}`));
-      children.push(new Paragraph(`RMB ${formatMoney(receipt.originalAmount)} × ${receipt.hkabRate || 'rate'} / 100 = HK$ ${formatMoney(receipt.hkdAmount)}`));
+    if (receipt.rateCode && receipt.rateCode !== 'HKD') {
+      children.push(new Paragraph(`Original Amount: ${receipt.currency} ${formatMoney(receipt.originalAmount)}`));
+      if (receipt.hkabRate) {
+        children.push(new Paragraph(`Exchange rate ${receipt.hkabRate}`));
+        children.push(new Paragraph(`${receipt.currency} ${formatMoney(receipt.originalAmount)} × ${receipt.hkabRate} / 100 = HK$ ${formatMoney(receipt.hkdAmount)}`));
+      } else {
+        children.push(new Paragraph(`Manual HKD amount: HK$ ${formatMoney(receipt.hkdAmount)}`));
+      }
       children.push(new Paragraph({
         children: [
           new TextRun('Exchange-rate source: '),
@@ -912,13 +942,15 @@ async function buildWord(receipts, wordPath, claimant) {
       }));
     }
     if (receipt.warning) children.push(new Paragraph(`Review Note: ${receipt.warning}`));
-    children.push(new Paragraph('Original receipt screenshot:'));
-    await addImageIfPossible(children, receipt.receiptScreenshot || receipt.copiedPath, 620);
-    if (receipt.rateScreenshot) {
-      children.push(new Paragraph('HKAB exchange-rate screenshot:'));
-      await addImageIfPossible(children, receipt.rateScreenshot, 620);
+    if (layoutOptions.exchangeEvidencePosition === 'beforeReceipt') {
+      await addRateEvidence(children, receipt);
     }
-    if (i < receipts.length - 1) {
+    children.push(new Paragraph('Original receipt image:'));
+    await addImageIfPossible(children, receipt.receiptScreenshot || receipt.copiedPath, 620);
+    if (layoutOptions.exchangeEvidencePosition !== 'beforeReceipt') {
+      await addRateEvidence(children, receipt);
+    }
+    if (layoutOptions.receiptStartsNewPage && i < receipts.length - 1) {
       children.push(new Paragraph({ children: [new PageBreak()] }));
     }
   }
@@ -930,6 +962,13 @@ async function buildWord(receipts, wordPath, claimant) {
   await fs.writeFile(wordPath, buffer);
 }
 
+async function addRateEvidence(children, receipt) {
+  if (receipt.rateScreenshot) {
+    children.push(new Paragraph('HKAB exchange-rate evidence:'));
+    await addImageIfPossible(children, receipt.rateScreenshot, 620);
+  }
+}
+
 async function addImageIfPossible(children, filePath, width) {
   try {
     const ext = path.extname(filePath).toLowerCase();
@@ -938,17 +977,40 @@ async function addImageIfPossible(children, filePath, width) {
       return;
     }
     const image = await fs.readFile(filePath);
+    const dimensions = getImageDimensions(image, ext);
+    const height = dimensions
+      ? Math.round(width * dimensions.height / dimensions.width)
+      : Math.round(width * 0.72);
     children.push(new Paragraph({
       children: [
         new ImageRun({
           data: image,
-          transformation: { width, height: Math.round(width * 0.72) },
+          transformation: { width, height },
         }),
       ],
     }));
   } catch (_error) {
     children.push(new Paragraph(`Source file: ${path.basename(filePath)}`));
   }
+}
+
+function getImageDimensions(buffer, ext) {
+  if (ext === '.png' && buffer.length >= 24 && buffer.toString('ascii', 1, 4) === 'PNG') {
+    return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+  }
+  if (['.jpg', '.jpeg'].includes(ext)) {
+    let offset = 2;
+    while (offset < buffer.length) {
+      if (buffer[offset] !== 0xff) return null;
+      const marker = buffer[offset + 1];
+      const length = buffer.readUInt16BE(offset + 2);
+      if (marker >= 0xc0 && marker <= 0xc3) {
+        return { height: buffer.readUInt16BE(offset + 5), width: buffer.readUInt16BE(offset + 7) };
+      }
+      offset += 2 + length;
+    }
+  }
+  return null;
 }
 
 async function createTextPng(text, outputPath) {
@@ -962,6 +1024,10 @@ async function createTextPng(text, outputPath) {
 function normalizeAmount(value) {
   const number = Number(String(value).replace(/,/g, ''));
   return Number.isFinite(number) ? number.toFixed(2) : '';
+}
+
+function trimRate(value) {
+  return Number(value).toFixed(6).replace(/0+$/, '').replace(/\.$/, '');
 }
 
 function formatMoney(value) {
@@ -1016,6 +1082,13 @@ function joinWarning(existing, addition) {
   return [existing, addition].filter(Boolean).join(' ');
 }
 
+function normalizeLayoutOptions(options = {}) {
+  return {
+    receiptStartsNewPage: options.receiptStartsNewPage !== false,
+    exchangeEvidencePosition: options.exchangeEvidencePosition === 'beforeReceipt' ? 'beforeReceipt' : 'afterReceipt',
+  };
+}
+
 function normalizeClaimantInfo(info = {}) {
   return {
     claimantName: String(info.claimantName || '').trim(),
@@ -1023,4 +1096,57 @@ function normalizeClaimantInfo(info = {}) {
     staffStudentNo: String(info.staffStudentNo || '').trim(),
     telephoneNo: String(info.telephoneNo || '').trim(),
   };
+}
+
+module.exports = {
+  buildPdfRenderHtml,
+  buildWord,
+  buildExcel,
+  extractAmount,
+  extractCurrency,
+  getImageDimensions,
+  normalizeCurrencyCode,
+  normalizeLayoutOptions,
+  preflightExchangeRates,
+};
+
+function profilesPath() {
+  return path.join(app.getPath('userData'), 'claimant-profiles.json');
+}
+
+async function readProfilesFile() {
+  try {
+    const raw = await fs.readFile(profilesPath(), 'utf8');
+    const profiles = JSON.parse(raw);
+    return Array.isArray(profiles) ? profiles : [];
+  } catch (_error) {
+    return [];
+  }
+}
+
+async function writeProfilesFile(profiles) {
+  await fs.mkdir(path.dirname(profilesPath()), { recursive: true });
+  await fs.writeFile(profilesPath(), JSON.stringify(profiles, null, 2), 'utf8');
+}
+
+async function listProfiles() {
+  return readProfilesFile();
+}
+
+async function saveProfile(profile) {
+  const normalized = normalizeClaimantInfo(profile);
+  const id = String(profile.id || normalized.claimantName || Date.now()).trim() || String(Date.now());
+  const saved = { id, ...normalized };
+  const profiles = (await readProfilesFile()).filter((item) => item.id !== id);
+  profiles.push(saved);
+  profiles.sort((a, b) => a.claimantName.localeCompare(b.claimantName));
+  await writeProfilesFile(profiles);
+  return profiles;
+}
+
+async function deleteProfile(profileId) {
+  const id = String(profileId || '');
+  const profiles = (await readProfilesFile()).filter((item) => item.id !== id);
+  await writeProfilesFile(profiles);
+  return profiles;
 }

@@ -78,6 +78,7 @@ button:disabled {
 .paths,
 .status,
 .claimant,
+.layoutOptions,
 .progressPanel {
   margin: 14px 28px 0;
   padding: 12px 14px;
@@ -94,19 +95,49 @@ button:disabled {
 
 .claimant {
   display: grid;
-  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  grid-template-columns: repeat(6, minmax(140px, 1fr));
   gap: 12px;
 }
 
-.claimant label {
+.claimant label,
+.layoutOptions label {
   display: grid;
   gap: 6px;
   color: var(--muted);
   font-size: 12px;
 }
 
-.claimant input {
+.claimant input,
+.layoutOptions input,
+.layoutOptions select {
   color: var(--text);
+}
+
+.profileActions {
+  display: flex;
+  gap: 8px;
+  align-items: end;
+}
+
+.profileActions button {
+  width: 100%;
+}
+
+.layoutOptions {
+  display: flex;
+  gap: 22px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.layoutOptions label:first-child {
+  display: flex;
+  align-items: center;
+}
+
+.layoutOptions input[type="checkbox"] {
+  width: auto;
+  min-width: 0;
 }
 
 .status {
@@ -194,4 +225,14 @@ select {
   padding: 28px;
   text-align: center;
   color: var(--muted);
+}
+
+tr.missingRate td {
+  background: #fff7ed;
+}
+
+tr.missingRate input[data-field="hkabRate"],
+tr.missingRate input[data-field="hkdAmount"] {
+  border-color: #d97706;
+  box-shadow: 0 0 0 2px rgba(217, 119, 6, 0.18);
 }

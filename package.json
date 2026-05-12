@@ -4,15 +4,39 @@
   "description": "Bilingual desktop app for generating English HKU reimbursement packages.",
   "main": "src/main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "test": "node --test",
+    "package:win": "electron-builder --win portable",
+    "dist:win": "electron-builder --win"
+  },
+  "build": {
+    "appId": "hk.edu.hku.reimbursement-generator",
+    "productName": "HKU Reimbursement Generator",
+    "files": [
+      "src/**/*",
+      "templates/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "portable",
+        "nsis"
+      ]
+    },
+    "directories": {
+      "output": "dist"
+    }
   },
   "dependencies": {
     "docx": "^8.5.0",
     "electron": "^30.5.1",
     "exceljs": "^4.4.0",
     "pdf-parse": "^1.1.1",
+    "pdfjs-dist": "^4.10.38",
     "playwright": "^1.44.1",
     "tesseract.js": "^5.1.0"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "electron-builder": "^24.13.3"
+  }
 }

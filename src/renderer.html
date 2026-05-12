@@ -24,6 +24,12 @@
 
       <section class="claimant">
         <label>
+          <span>常用信息 / Profile</span>
+          <select id="profileSelect">
+            <option value="">Unsaved profile</option>
+          </select>
+        </label>
+        <label>
           <span>收款人 / Claimant Payee Name</span>
           <input id="claimantName" placeholder="e.g. CLAIMANT NAME" />
         </label>
@@ -38,6 +44,24 @@
         <label>
           <span>电话 / Telephone No.</span>
           <input id="telephoneNo" />
+        </label>
+        <div class="profileActions">
+          <button id="saveProfile" type="button">Save Profile</button>
+          <button id="deleteProfile" type="button">Delete Profile</button>
+        </div>
+      </section>
+
+      <section class="layoutOptions">
+        <label>
+          <input id="receiptStartsNewPage" type="checkbox" checked />
+          <span>每张票据单独分页 / Each receipt starts on a new page</span>
+        </label>
+        <label>
+          <span>汇率证明 / Exchange-rate evidence</span>
+          <select id="exchangeEvidencePosition">
+            <option value="afterReceipt">票据图片之后 / After receipt image</option>
+            <option value="beforeReceipt">票据图片之前 / Before receipt image</option>
+          </select>
         </label>
       </section>
 
